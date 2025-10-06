@@ -25,11 +25,32 @@ type EvaluateOptions = {
   hush?: boolean
 }
 
-type StrudelCore = typeof import('@strudel/core')
-type StrudelWebAudio = typeof import('@strudel/webaudio')
-type StrudelWeb = typeof import('@strudel/web')
+type StrudelCore = UnknownRecord & {
+  evalScope: (...modules: unknown[]) => Promise<unknown>
+  repl: (options: UnknownRecord) => {
+    setCps: (cps: number) => void
+    evaluate: (code: string, autostart?: boolean, hush?: boolean) => Promise<unknown>
+    setCode?: (code: string) => void
+    start: () => void
+    pause: () => void
+    stop: () => void
+    toggle: () => void
+  }
+  noteToMidi?: (value: string) => number
+}
 
-type Transpiler = typeof import('@strudel/transpiler')['transpiler']
+type StrudelWebAudio = UnknownRecord & {
+  webaudioOutput: (...args: unknown[]) => unknown
+  webaudioRepl: (options: UnknownRecord) => ReturnType<StrudelCore['repl']>
+  samples?: (...args: unknown[]) => Promise<unknown>
+  initAudioOnFirstClick?: (...args: unknown[]) => Promise<unknown>
+  registerSynthSounds?: (...args: unknown[]) => Promise<unknown>
+  getAudioContext?: () => AudioContext
+}
+
+type StrudelWeb = UnknownRecord
+
+type Transpiler = (code: string, options?: UnknownRecord) => unknown
 
 type StrudelReplState = {
   miniLocations?: Array<[number, number]>
@@ -44,6 +65,8 @@ interface HapLike {
     locations?: Array<{ start: number; end: number }>
   }
 }
+
+type UnknownRecord = Record<string, unknown>
 
 const DEFAULT_BPM = 120
 const DIRT_SAMPLE_SOURCE = 'github:tidalcycles/dirt-samples'
@@ -95,7 +118,15 @@ export class StrudelEngine {
     }
 
     this.readyPromise = (async () => {
-      const [core, miniModule, tonalModule, xenModule, webaudioModule, webModule, transpilerModule] = await Promise.all([
+      const [
+        core,
+        miniModule,
+        tonalModule,
+        xenModule,
+        webaudioModule,
+        webModule,
+        transpilerModuleRaw,
+      ] = (await Promise.all([
         import('@strudel/core'),
         import('@strudel/mini'),
         import('@strudel/tonal'),
@@ -103,12 +134,29 @@ export class StrudelEngine {
         import('@strudel/webaudio'),
         import('@strudel/web'),
         import('@strudel/transpiler'),
-      ])
+      ])) as unknown as [
+        StrudelCore,
+        UnknownRecord,
+        UnknownRecord,
+        UnknownRecord,
+        StrudelWebAudio,
+        StrudelWeb,
+        UnknownRecord
+      ]
 
       this.core = core
       this.webaudio = webaudioModule
       this.web = webModule
-      this.transpiler = transpilerModule.transpiler
+      const transpilerExports = transpilerModuleRaw as UnknownRecord
+      let transpilerFn: unknown = transpilerExports.transpiler
+      if (typeof transpilerFn !== 'function') {
+        const defaultExport = transpilerExports.default as UnknownRecord | undefined
+        transpilerFn = defaultExport?.transpiler
+      }
+      if (typeof transpilerFn !== 'function') {
+        throw new Error('Failed to load Strudel transpiler')
+      }
+      this.transpiler = transpilerFn as Transpiler
 
       await core.evalScope(core, miniModule, tonalModule, xenModule, webaudioModule, webModule)
 
@@ -131,8 +179,8 @@ export class StrudelEngine {
         defaultOutput: highlightOutput,
         beforeStart: () => this.ensureAudio(),
         transpiler: this.transpiler,
-        onUpdateState: (next) => this.handleStateUpdate(next),
-        onEvalError: (err) => this.handleEvalError(err),
+        onUpdateState: (next: StrudelReplState) => this.handleStateUpdate(next),
+        onEvalError: (err: unknown) => this.handleEvalError(err),
         afterEval: () => this.setState({ lastEvaluatedAt: Date.now() }),
         id: 'next-strudel-repl',
       })
@@ -213,15 +261,13 @@ export class StrudelEngine {
   }
 
   private setState(update: Partial<EngineState>) {
-    let changed = false
-    const next: EngineState = { ...this.state }
-
-    for (const [key, value] of Object.entries(update) as [keyof EngineState, unknown][]) {
-      if (!Object.is(next[key], value)) {
-        next[key] = value as EngineState[keyof EngineState]
-        changed = true
-      }
+    const keys = Object.keys(update ?? {}) as (keyof EngineState)[]
+    if (keys.length === 0) {
+      return
     }
+
+    const next = { ...this.state, ...update } as EngineState
+    const changed = keys.some((key) => !Object.is(this.state[key], next[key]))
 
     if (!changed) {
       return
@@ -285,7 +331,8 @@ export class StrudelEngine {
   }
 
   private async loadSamples(source: string) {
-    if (!this.webaudio?.samples || this.state.samplesLoaded) {
+    const samplesFn = this.webaudio?.samples
+    if (!samplesFn || this.state.samplesLoaded) {
       return
     }
     if (this.sampleLoadPromise) {
@@ -296,7 +343,7 @@ export class StrudelEngine {
       this.setState({ isLoadingSamples: true })
       try {
         await this.audioInitPromise
-        await this.webaudio!.samples(source)
+        await samplesFn.call(this.webaudio, source)
         this.setState({ samplesLoaded: true })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
