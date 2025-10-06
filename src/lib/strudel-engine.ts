@@ -9,11 +9,13 @@ export interface EngineState {
   isPlaying: boolean
   isEvaluating: boolean
   bpm: number
-  error?: string
+  audioUnlocked: boolean
+  samplesLoaded: boolean
+  isLoadingSamples: boolean
   miniLocations: MiniLocation[]
   activeLocations: MiniLocation[]
   lastEvaluatedAt?: number
-  audioUnlocked: boolean
+  error?: string
 }
 
 type Listener = (state: EngineState) => void
@@ -24,33 +26,10 @@ type EvaluateOptions = {
 }
 
 type StrudelCore = typeof import('@strudel/core')
+type StrudelWebAudio = typeof import('@strudel/webaudio')
+type StrudelWeb = typeof import('@strudel/web')
 
-interface StrudelLocation {
-  start: number
-  end: number
-}
-
-interface StrudelValue {
-  note?: string | number | Array<string | number>
-  n?: number | number[]
-  freq?: number
-  gain?: number
-  velocity?: number
-  amp?: number
-  attack?: number
-  release?: number
-  wave?: string
-  waveform?: string
-  shape?: string
-  [key: string]: unknown
-}
-
-interface StrudelHap {
-  value?: StrudelValue | null
-  context?: {
-    locations?: StrudelLocation[]
-  }
-}
+type Transpiler = typeof import('@strudel/transpiler')['transpiler']
 
 type StrudelReplState = {
   miniLocations?: Array<[number, number]>
@@ -60,37 +39,44 @@ type StrudelReplState = {
   schedulerError?: unknown
 } & Record<string, unknown>
 
-type AudioWindow = Window & {
-  webkitAudioContext?: typeof AudioContext
+interface HapLike {
+  context?: {
+    locations?: Array<{ start: number; end: number }>
+  }
 }
 
-
 const DEFAULT_BPM = 120
-
+const DIRT_SAMPLE_SOURCE = 'github:tidalcycles/dirt-samples'
 
 export class StrudelEngine {
   private listeners = new Set<Listener>()
-  public getState() {
-    return this.state
-  }
 
   private state: EngineState = {
     isReady: false,
     isPlaying: false,
     isEvaluating: false,
     bpm: DEFAULT_BPM,
+    audioUnlocked: false,
+    samplesLoaded: false,
+    isLoadingSamples: false,
     miniLocations: [],
     activeLocations: [],
-    audioUnlocked: false,
   }
+
   private core?: StrudelCore
+  private webaudio?: StrudelWebAudio
+  private web?: StrudelWeb
   private repl?: ReturnType<StrudelCore['repl']>
-  private transpiler?: typeof import('@strudel/transpiler')['transpiler']
-  private noteToMidi?: (value: string) => number
-  private audioCtx?: AudioContext
-  private masterGain?: GainNode
-  private activeMap = new Map<string, { range: MiniLocation; count: number }>()
+  private transpiler?: Transpiler
+
   private readyPromise?: Promise<void>
+  private audioInitPromise?: Promise<void>
+  private sampleLoadPromise?: Promise<void>
+  private activeMap = new Map<string, { range: MiniLocation; count: number }>()
+
+  getState() {
+    return this.state
+  }
 
   subscribe(listener: Listener) {
     this.listeners.add(listener)
@@ -107,23 +93,42 @@ export class StrudelEngine {
     if (typeof window === 'undefined') {
       throw new Error('StrudelEngine can only be initialised in a browser environment')
     }
+
     this.readyPromise = (async () => {
-      const [core, miniModule, transpilerModule] = await Promise.all([
+      const [core, miniModule, tonalModule, xenModule, webaudioModule, webModule, transpilerModule] = await Promise.all([
         import('@strudel/core'),
         import('@strudel/mini'),
+        import('@strudel/tonal'),
+        import('@strudel/xen'),
+        import('@strudel/webaudio'),
+        import('@strudel/web'),
         import('@strudel/transpiler'),
       ])
 
       this.core = core
+      this.webaudio = webaudioModule
+      this.web = webModule
       this.transpiler = transpilerModule.transpiler
-      this.noteToMidi = core.noteToMidi ?? undefined
 
-      await core.evalScope(core, miniModule)
+      await core.evalScope(core, miniModule, tonalModule, xenModule, webaudioModule, webModule)
 
-      this.repl = core.repl({
-        defaultOutput: (hap, deadline, duration, cps, scheduled) =>
-          this.defaultOutput(hap, deadline, duration, cps, scheduled),
-        getTime: () => this.getTime(),
+      const baseOutput = webaudioModule.webaudioOutput
+
+      const highlightOutput = async (
+        hap: HapLike,
+        deadline: number,
+        duration: number,
+        cps: number,
+        scheduled: number,
+      ) => {
+        await this.ensureAudio()
+        await this.loadSamples(DIRT_SAMPLE_SOURCE)
+        this.sendHighlights(hap, duration)
+        return baseOutput(hap as unknown, deadline, duration, cps, scheduled)
+      }
+
+      this.repl = webaudioModule.webaudioRepl({
+        defaultOutput: highlightOutput,
         beforeStart: () => this.ensureAudio(),
         transpiler: this.transpiler,
         onUpdateState: (next) => this.handleStateUpdate(next),
@@ -133,7 +138,6 @@ export class StrudelEngine {
       })
 
       this.repl.setCps(this.state.bpm / 60)
-
       this.setState({ isReady: true })
     })()
 
@@ -162,7 +166,9 @@ export class StrudelEngine {
   }
 
   async start() {
+    await this.init()
     await this.ensureAudio()
+    await this.loadSamples(DIRT_SAMPLE_SOURCE)
     try {
       this.repl?.start()
     } catch (error) {
@@ -190,15 +196,14 @@ export class StrudelEngine {
   dispose() {
     this.stop()
     this.listeners.clear()
-    if (this.audioCtx) {
-      const ctx = this.audioCtx
-      this.audioCtx = undefined
-      if (typeof ctx.close === 'function') {
-        ctx.close().catch(() => undefined)
+    this.activeMap.clear()
+    if (this.state.audioUnlocked && this.webaudio?.getAudioContext) {
+      try {
+        this.webaudio.getAudioContext().close()
+      } catch {
+        /* noop */
       }
     }
-    this.masterGain = undefined
-    this.activeMap.clear()
   }
 
   private emit() {
@@ -210,15 +215,18 @@ export class StrudelEngine {
   private setState(update: Partial<EngineState>) {
     let changed = false
     const next: EngineState = { ...this.state }
+
     for (const [key, value] of Object.entries(update) as [keyof EngineState, unknown][]) {
       if (!Object.is(next[key], value)) {
         next[key] = value as EngineState[keyof EngineState]
         changed = true
       }
     }
+
     if (!changed) {
       return
     }
+
     this.state = next
     this.emit()
   }
@@ -234,15 +242,13 @@ export class StrudelEngine {
         : String(errorSource)
       : undefined
 
-    const shouldUpdateLocations = !rangesEqual(this.state.miniLocations, miniLocations)
-
     const update: Partial<EngineState> = {
       isPlaying: Boolean(next?.started),
       isEvaluating: Boolean(next?.pending),
       error: errorMessage,
     }
 
-    if (shouldUpdateLocations) {
+    if (!rangesEqual(this.state.miniLocations, miniLocations)) {
       update.miniLocations = miniLocations
     }
 
@@ -255,82 +261,62 @@ export class StrudelEngine {
   }
 
   private async ensureAudio() {
-    if (typeof window === 'undefined') {
-      return undefined
+    if (!this.webaudio) {
+      return
     }
-    if (!this.audioCtx) {
-      const audioWindow = window as AudioWindow
-      const AudioContextClass: typeof AudioContext | undefined =
-        typeof window.AudioContext !== 'undefined' ? window.AudioContext : audioWindow.webkitAudioContext
-      if (!AudioContextClass) {
-        this.setState({ error: 'Web Audio API is not supported in this browser.' })
-        return undefined
+    if (!this.audioInitPromise) {
+      const { initAudioOnFirstClick, registerSynthSounds } = this.webaudio
+      this.audioInitPromise = (async () => {
+        try {
+          await initAudioOnFirstClick?.()
+          await registerSynthSounds?.()
+          this.setState({ audioUnlocked: true })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          this.setState({ error: message })
+          throw error
+        }
+      })()
+      this.audioInitPromise.catch(() => {
+        /* error already handled in setState */
+      })
+    }
+    return this.audioInitPromise
+  }
+
+  private async loadSamples(source: string) {
+    if (!this.webaudio?.samples || this.state.samplesLoaded) {
+      return
+    }
+    if (this.sampleLoadPromise) {
+      return this.sampleLoadPromise
+    }
+
+    this.sampleLoadPromise = (async () => {
+      this.setState({ isLoadingSamples: true })
+      try {
+        await this.audioInitPromise
+        await this.webaudio!.samples(source)
+        this.setState({ samplesLoaded: true })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.setState({ error: message })
+        throw error
+      } finally {
+        this.setState({ isLoadingSamples: false })
       }
-      this.audioCtx = new AudioContextClass({ latencyHint: 'interactive' })
-      this.masterGain = this.audioCtx.createGain()
-      this.masterGain.gain.value = 0.7
-      this.masterGain.connect(this.audioCtx.destination)
-    }
-    if (this.audioCtx.state === 'suspended') {
-      await this.audioCtx.resume()
-    }
-    if (!this.state.audioUnlocked) {
-      this.setState({ audioUnlocked: true })
-    }
-    return this.audioCtx
+    })()
+
+    return this.sampleLoadPromise
   }
 
-  private getTime() {
-    if (this.audioCtx) {
-      return this.audioCtx.currentTime
+  private sendHighlights(hap: HapLike, duration: number) {
+    const locations = hap.context?.locations ?? []
+    if (!locations.length) {
+      return
     }
-    if (typeof performance !== 'undefined') {
-      return performance.now() / 1000
-    }
-    return Date.now() / 1000
-  }
-
-  private resolveFrequency(value?: StrudelValue | null): number | undefined {
-    if (!value) {
-      return undefined
-    }
-    if (typeof value.freq === 'number') {
-      return value.freq
-    }
-    const note = Array.isArray(value.note) ? value.note[0] : value.note
-    if (typeof note === 'number') {
-      return midiToHz(note)
-    }
-    if (typeof note === 'string') {
-      const midi = this.noteToMidi ? this.noteToMidi(note) : noteNameToMidi(note)
-      return midiToHz(midi)
-    }
-    const n = Array.isArray(value.n) ? value.n[0] : value.n
-    if (typeof n === 'number') {
-      // interpret as midi number when within midi range
-      const candidate = n >= 0 && n <= 127 ? n : n + 60
-      return midiToHz(candidate)
-    }
-    return undefined
-  }
-
-  private resolveGain(value?: StrudelValue | null): number {
-    const base = 0.4
-    const gain = typeof value?.gain === 'number' ? value.gain : 1
-    const velocity = typeof value?.velocity === 'number' ? value.velocity : 1
-    const amp = typeof value?.amp === 'number' ? value.amp : 1
-    return clamp(base * gain * velocity * amp, 0.05, 1)
-  }
-
-  private resolveWaveform(value?: StrudelValue | null): OscillatorType {
-    const raw = value?.wave || value?.waveform || value?.shape
-    if (typeof raw === 'string') {
-      const candidate = raw.toLowerCase()
-      if (['sine', 'square', 'triangle', 'sawtooth'].includes(candidate)) {
-        return candidate as OscillatorType
-      }
-    }
-    return 'sine'
+    const ranges = locations.map((loc) => [loc.start, loc.end] as MiniLocation)
+    this.scheduleHighlight(ranges, duration)
   }
 
   private scheduleHighlight(locations: MiniLocation[], durationSeconds: number) {
@@ -380,50 +366,6 @@ export class StrudelEngine {
     this.activeMap.clear()
     this.setState({ activeLocations: [] })
   }
-
-  private async defaultOutput(hap: StrudelHap, _deadline: number, duration: number, _cps: number, scheduled: number) {
-    const ctx = await this.ensureAudio()
-    if (!ctx || !this.masterGain) {
-      return
-    }
-
-    const frequency = this.resolveFrequency(hap?.value)
-    if (!frequency) {
-      return
-    }
-
-    const oscillator = ctx.createOscillator()
-    oscillator.type = this.resolveWaveform(hap?.value)
-    oscillator.frequency.setValueAtTime(frequency, scheduled)
-
-    const gainNode = ctx.createGain()
-    const amplitude = this.resolveGain(hap?.value)
-    const attack = typeof hap?.value?.attack === 'number' ? clamp(hap.value.attack, 0.001, 1) : 0.015
-    const release = typeof hap?.value?.release === 'number' ? clamp(hap.value.release, 0.01, 1.5) : 0.12
-    const start = scheduled
-    const end = scheduled + Math.max(duration, attack + 0.05)
-
-    gainNode.gain.setValueAtTime(0, start)
-    gainNode.gain.linearRampToValueAtTime(amplitude, start + attack)
-    gainNode.gain.linearRampToValueAtTime(0.0001, end + release)
-
-    oscillator.connect(gainNode)
-    gainNode.connect(this.masterGain)
-
-    oscillator.onended = () => {
-      oscillator.disconnect()
-      gainNode.disconnect()
-    }
-
-    oscillator.start(start)
-    oscillator.stop(end + release + 0.05)
-
-    const locationSource = hap.context?.locations ?? []
-    const locations = locationSource.map((loc) => [loc.start, loc.end] as MiniLocation)
-    if (locations.length) {
-      this.scheduleHighlight(locations, duration + release)
-    }
-  }
 }
 
 export function useStrudelEngine(engine: StrudelEngine, listener: Listener) {
@@ -433,51 +375,6 @@ export function useStrudelEngine(engine: StrudelEngine, listener: Listener) {
   useEffect(() => {
     return engine.subscribe((state) => listenerRef.current(state))
   }, [engine])
-}
-
-function midiToHz(midi: number) {
-  return 440 * Math.pow(2, (midi - 69) / 12)
-}
-
-function noteNameToMidi(note: string): number {
-  const trimmed = note.trim()
-  const match = trimmed.match(/^([A-Ga-g])(b|#)?(\d+)?$/)
-  if (!match) {
-    return 60
-  }
-  const [, letter, accidental = '', octaveRaw] = match
-  const pitchClasses: Record<string, number> = {
-    c: 0,
-    'c#': 1,
-    db: 1,
-    d: 2,
-    'd#': 3,
-    eb: 3,
-    e: 4,
-    'e#': 5,
-    fb: 4,
-    f: 5,
-    'f#': 6,
-    gb: 6,
-    g: 7,
-    'g#': 8,
-    ab: 8,
-    a: 9,
-    'a#': 10,
-    bb: 10,
-    b: 11,
-    'b#': 0,
-    cb: 11,
-  }
-  const stepKey = `${letter.toLowerCase()}${accidental.toLowerCase()}`
-  const pc = pitchClasses[stepKey] ?? pitchClasses[letter.toLowerCase()] ?? 0
-  const octave = octaveRaw ? Number.parseInt(octaveRaw, 10) : 4
-  const midi = (octave + 1) * 12 + pc
-  return clamp(midi, 0, 127)
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value))
 }
 
 function rangesEqual(a: MiniLocation[], b: MiniLocation[]) {

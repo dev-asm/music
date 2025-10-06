@@ -30,14 +30,54 @@ stack(
 const baseHighlight = Decoration.mark({ class: 'cm-mini-highlight' })
 const activeHighlight = Decoration.mark({ class: 'cm-mini-active' })
 
-function buildHighlightExtension(mini: MiniLocation[], active: MiniLocation[]): Extension {
+function buildHighlightExtension(mini: MiniLocation[], active: MiniLocation[], docLength: number): Extension {
+  type Highlight = { from: number; to: number; decoration: Decoration; priority: number }
+  const normalise = ([start, end]: MiniLocation, decoration: Decoration, priority: number): Highlight | null => {
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return null
+    }
+    if (docLength <= 0) {
+      return null
+    }
+    const min = Math.min(start, end)
+    const max = Math.max(start, end)
+    const from = Math.max(0, Math.min(docLength - 1, Math.floor(min)))
+    const to = Math.max(0, Math.min(docLength, Math.ceil(max)))
+    if (to <= from) {
+      return null
+    }
+    return { from, to, decoration, priority }
+  }
+
+  const ranges: Highlight[] = []
+  mini.forEach((range) => {
+    const highlight = normalise(range, baseHighlight, 0)
+    if (highlight) {
+      ranges.push(highlight)
+    }
+  })
+  active.forEach((range) => {
+    const highlight = normalise(range, activeHighlight, 1)
+    if (highlight) {
+      ranges.push(highlight)
+    }
+  })
+
+  ranges.sort((a, b) => {
+    if (a.from !== b.from) {
+      return a.from - b.from
+    }
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority
+    }
+    return a.to - b.to
+  })
+
   const builder = new RangeSetBuilder<Decoration>()
-  mini.forEach(([from, to]) => {
-    builder.add(from, to, baseHighlight)
+  ranges.forEach(({ from, to, decoration }) => {
+    builder.add(from, to, decoration)
   })
-  active.forEach(([from, to]) => {
-    builder.add(from, to, activeHighlight)
-  })
+
   return EditorView.decorations.of(builder.finish())
 }
 
@@ -70,8 +110,14 @@ function formatStatus(state: EngineState) {
   if (state.error) {
     return 'Pattern error'
   }
+  if (state.isLoadingSamples) {
+    return 'Loading Dirt samples…'
+  }
+  if (!state.samplesLoaded) {
+    return 'Samples will load on first Play.'
+  }
   if (!state.audioUnlocked) {
-    return 'Audio engine will start when you press Run or Play.'
+    return 'Audio unlocks on your first Play.'
   }
   if (state.isEvaluating) {
     return 'Evaluating pattern…'
@@ -83,11 +129,14 @@ function formatStatus(state: EngineState) {
 }
 
 export function LiveCodingWorkspace() {
-  const engineRef = useRef<StrudelEngine>()
+  const engineRef = useRef<StrudelEngine | null>(null)
   if (!engineRef.current) {
     engineRef.current = engineInstance()
   }
   const engine = engineRef.current
+  if (!engine) {
+    throw new Error('Strudel engine failed to initialise')
+  }
 
   const [code, setCode] = useState(DEFAULT_CODE)
   const [engineState, setEngineState] = useState<EngineState>(engine.getState())
@@ -118,8 +167,8 @@ export function LiveCodingWorkspace() {
   }, [engine])
 
   const highlightExtension = useMemo(
-    () => buildHighlightExtension(engineState.miniLocations, engineState.activeLocations),
-    [engineState.miniLocations, engineState.activeLocations],
+    () => buildHighlightExtension(engineState.miniLocations, engineState.activeLocations, code.length),
+    [engineState.miniLocations, engineState.activeLocations, code.length],
   )
 
   const extensions = useMemo<Extension[]>(
@@ -188,7 +237,11 @@ export function LiveCodingWorkspace() {
               <Play className="size-4" />
               <span className="ml-1">Run Pattern</span>
             </Button>
-            <Button variant="outline" onClick={handleToggle} disabled={!engineState.isReady}>
+            <Button
+              variant="outline"
+              onClick={handleToggle}
+              disabled={!engineState.isReady || engineState.isLoadingSamples}
+            >
               {engineState.isPlaying ? (
                 <>
                   <Pause className="size-4" />
@@ -201,7 +254,11 @@ export function LiveCodingWorkspace() {
                 </>
               )}
             </Button>
-            <Button variant="ghost" onClick={handleStop} disabled={!engineState.isReady}>
+            <Button
+              variant="ghost"
+              onClick={handleStop}
+              disabled={!engineState.isReady}
+            >
               <Square className="size-4" />
               <span className="ml-1">Stop</span>
             </Button>
