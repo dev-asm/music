@@ -417,7 +417,10 @@ export class StrudelEngine {
 
 export function useStrudelEngine(engine: StrudelEngine, listener: Listener) {
   const listenerRef = useRef(listener)
-  listenerRef.current = listener
+
+  useEffect(() => {
+    listenerRef.current = listener
+  }, [listener])
 
   useEffect(() => {
     return engine.subscribe((state) => listenerRef.current(state))

@@ -1,7 +1,13 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
-  /* config options here */
-};
+  reactStrictMode: true,
+  reactCompiler: true,
+  experimental: {
+    ppr: "incremental",
+    typedRoutes: true,
+    typedEnv: true,
+  },
+}
 
-export default nextConfig;
+export default nextConfig

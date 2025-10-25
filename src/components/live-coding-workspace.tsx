@@ -1,6 +1,6 @@
 'use client'
 
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { ChangeEvent, useEffect, useMemo, useState } from 'react'
 
 import CodeMirror from '@uiw/react-codemirror'
 import { javascript } from '@codemirror/lang-javascript'
@@ -129,17 +129,9 @@ function formatStatus(state: EngineState) {
 }
 
 export function LiveCodingWorkspace() {
-  const engineRef = useRef<StrudelEngine | null>(null)
-  if (!engineRef.current) {
-    engineRef.current = engineInstance()
-  }
-  const engine = engineRef.current
-  if (!engine) {
-    throw new Error('Strudel engine failed to initialise')
-  }
-
+  const [engine] = useState(() => engineInstance())
   const [code, setCode] = useState(DEFAULT_CODE)
-  const [engineState, setEngineState] = useState<EngineState>(engine.getState())
+  const [engineState, setEngineState] = useState<EngineState>(() => engine.getState())
 
   useEffect(() => {
     let isMounted = true
