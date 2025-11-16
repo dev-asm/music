@@ -23,6 +23,11 @@ declare module '@strudel/webaudio' {
   export = webaudio
 }
 
+declare module '@strudel/draw' {
+  const draw: Record<string, unknown>
+  export = draw
+}
+
 declare module '@strudel/web' {
   const web: Record<string, unknown>
   export = web

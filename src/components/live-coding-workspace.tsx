@@ -1,12 +1,12 @@
 'use client'
 
-import { ChangeEvent, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import CodeMirror from '@uiw/react-codemirror'
 import { javascript } from '@codemirror/lang-javascript'
 import { EditorState, Extension, RangeSetBuilder } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { Pause, Play, Square } from 'lucide-react'
+import { Loader2, Play, Square } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -17,7 +17,12 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import { StrudelEngine, type EngineState, type MiniLocation } from '@/lib/strudel-engine'
+import {
+  StrudelEngine,
+  type EngineState,
+  type MiniLocation,
+  type SampleBankState,
+} from '@/lib/strudel-engine'
 
 const DEFAULT_CODE = `// Patterns are composed with Strudel\'s mini-notation.
 // Press Run Pattern to evaluate the code and hear the result.
@@ -101,7 +106,7 @@ const editorTheme = EditorView.theme(
   { dark: false },
 )
 
-const engineInstance = () => new StrudelEngine()
+const engineInstance = () => new StrudelEngine({ autoRun: true })
 
 function formatStatus(state: EngineState) {
   if (!state.isReady) {
@@ -132,6 +137,16 @@ export function LiveCodingWorkspace() {
   const [engine] = useState(() => engineInstance())
   const [code, setCode] = useState(DEFAULT_CODE)
   const [engineState, setEngineState] = useState<EngineState>(() => engine.getState())
+  const [autoRun] = useState(engine.autoRun)
+  const lastEvaluatedCodeRef = useRef(DEFAULT_CODE)
+  const visualsRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    engine.setVisualContainer(visualsRef.current)
+    return () => {
+      engine.setVisualContainer(null)
+    }
+  }, [engine])
 
   useEffect(() => {
     let isMounted = true
@@ -145,6 +160,9 @@ export function LiveCodingWorkspace() {
     engine
       .init()
       .then(() => engine.evaluate(DEFAULT_CODE, { autostart: false }))
+      .then(() => {
+        lastEvaluatedCodeRef.current = DEFAULT_CODE
+      })
       .catch((error) => {
         if (process.env.NODE_ENV !== 'production') {
           console.error('Failed to initialise Strudel', error)
@@ -180,6 +198,7 @@ export function LiveCodingWorkspace() {
     }
     try {
       await engine.evaluate(code, { autostart: true })
+      lastEvaluatedCodeRef.current = code
     } catch (error) {
       if (process.env.NODE_ENV !== 'production') {
         console.error('Evaluation error', error)
@@ -187,92 +206,61 @@ export function LiveCodingWorkspace() {
     }
   }
 
-  const handleToggle = async () => {
+  useEffect(() => {
+    if (!autoRun) {
+      return
+    }
     if (!engineState.isReady) {
       return
     }
-    if (engineState.isPlaying) {
-      engine.pause()
+    if (code === lastEvaluatedCodeRef.current) {
       return
     }
-    await engine.start()
-  }
+    const handle = setTimeout(async () => {
+      try {
+        await engine.evaluate(code, { autostart: engineState.isPlaying })
+        lastEvaluatedCodeRef.current = code
+      } catch (error) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.error('Auto evaluation error', error)
+        }
+      }
+    }, 400)
 
-  const handleStop = () => {
-    if (!engineState.isReady) {
-      return
+    return () => {
+      clearTimeout(handle)
     }
-    engine.stop()
-  }
-
-  const handleTempo = (event: ChangeEvent<HTMLInputElement>) => {
-    if (!engineState.isReady) {
-      return
-    }
-    const next = Number.parseInt(event.target.value, 10)
-    if (Number.isFinite(next)) {
-      engine.setTempo(next)
-    }
-  }
+  }, [autoRun, code, engine, engineState.isPlaying, engineState.isReady])
 
   return (
-    <Card className="max-w-4xl mx-auto">
-      <CardHeader>
+    <div className="relative max-w-4xl mx-auto">
+      <div className="absolute -inset-8 gradient-rainbow opacity-50 blur-3xl rounded-xl" />
+      <Card className="relative bg-card">
+        <CardHeader>
         <CardTitle className="text-2xl">Strudel Live Coding</CardTitle>
         <CardDescription>
           Compose and perform generative music in the browser. Mini-notation segments highlight as
           they play.
         </CardDescription>
-        <CardAction className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={handleRun} disabled={!engineState.isReady || engineState.isEvaluating}>
-              <Play className="size-4" />
-              <span className="ml-1">Run Pattern</span>
-            </Button>
+        <CardAction className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
             <Button
-              variant="outline"
-              onClick={handleToggle}
-              disabled={!engineState.isReady || engineState.isLoadingSamples}
+              size="icon"
+              onClick={engineState.isPlaying ? engine.stop.bind(engine) : handleRun}
+              disabled={!engineState.isReady || engineState.isEvaluating}
+              aria-label={engineState.isPlaying ? 'Stop pattern' : 'Run pattern'}
             >
               {engineState.isPlaying ? (
-                <>
-                  <Pause className="size-4" />
-                  <span className="ml-1">Pause</span>
-                </>
+                <Square className="size-4" />
               ) : (
-                <>
-                  <Play className="size-4" />
-                  <span className="ml-1">Play</span>
-                </>
+                <Play className="size-4" />
               )}
             </Button>
-            <Button
-              variant="ghost"
-              onClick={handleStop}
-              disabled={!engineState.isReady}
-            >
-              <Square className="size-4" />
-              <span className="ml-1">Stop</span>
-            </Button>
           </div>
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span>Tempo</span>
-            <input
-              id="tempo"
-              type="number"
-              min={40}
-              max={240}
-              value={engineState.bpm}
-              disabled={!engineState.isReady}
-              onChange={handleTempo}
-              className="w-20 rounded-md border border-border bg-transparent px-2 py-1 text-foreground"
-            />
-            <span className="text-xs uppercase tracking-tight">BPM</span>
-          </label>
         </CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        <div className="rounded-xl border bg-muted/40 p-3">
+        <div className="relative min-h-[352px] rounded-xl border bg-muted/40 p-3 focus:outline-none focus-visible:outline-none">
           <CodeMirror
             value={code}
             height="320px"
@@ -281,7 +269,14 @@ export function LiveCodingWorkspace() {
             extensions={extensions}
             theme="light"
           />
+          {!engineState.isReady ? (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/85 backdrop-blur-sm">
+              <Loader2 className="size-6 animate-spin text-primary" />
+              <span className="text-xs font-medium text-muted-foreground">Booting Strudel engine…</span>
+            </div>
+          ) : null}
         </div>
+        <div ref={visualsRef} className="flex flex-col gap-4"></div>
         <div className="flex flex-col gap-2 text-sm">
           <p className="text-muted-foreground">{formatStatus(engineState)}</p>
           {engineState.error ? (
@@ -290,7 +285,200 @@ export function LiveCodingWorkspace() {
             </p>
           ) : null}
         </div>
+        <SampleBankSection engine={engine} banks={engineState.sampleBanks} engineReady={engineState.isReady} />
       </CardContent>
     </Card>
+    </div>
   )
 }
+
+type SampleBankSectionProps = {
+  engine: StrudelEngine
+  banks: SampleBankState[]
+  engineReady: boolean
+}
+
+const SAMPLE_MAP_EXAMPLE = `{
+  "bd": "bd/BT0AADA.wav",
+  "sd": "sd/rytm-01-classic.wav",
+  "hh": "hh27/000_hh27closedhh.wav"
+}`
+
+function SampleBankSection({ engine, banks, engineReady }: SampleBankSectionProps) {
+  const [label, setLabel] = useState('CustomKit')
+  const [baseUrl, setBaseUrl] = useState('github:tidalcycles/dirt-samples/master/')
+  const [mapInput, setMapInput] = useState(SAMPLE_MAP_EXAMPLE)
+  const [error, setError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+
+  const handleExample = () => {
+    setLabel('DirtMiniKit')
+    setBaseUrl('github:tidalcycles/dirt-samples/master/')
+    setMapInput(SAMPLE_MAP_EXAMPLE)
+    setError(null)
+  }
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!engineReady) {
+      setError('Strudel is still initialising. Please wait a moment.')
+      return
+    }
+    setIsSubmitting(true)
+    try {
+      const parsed = JSON.parse(mapInput)
+      const resolvedLabel = label.trim() || 'CustomKit'
+      const resolvedBaseUrl = baseUrl.trim()
+      await engine.loadSampleBank(parsed, {
+        label: resolvedLabel,
+        baseUrl: resolvedBaseUrl || undefined,
+      })
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleReload = (id: string) => {
+    engine.loadSampleBankById(id).catch((err) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.error('Failed to reload sample bank', err)
+      }
+    })
+  }
+
+  const handleRemove = (id: string) => {
+    engine.removeSampleBank(id)
+  }
+
+  return (
+    <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-3 rounded-xl border border-border/60 bg-muted/30 p-4 text-sm"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold">Custom Sample Bank</h3>
+            <p className="text-xs text-muted-foreground">
+              Load bespoke maps via Strudel&apos;s `samples()` helper as shown in the docs.
+            </p>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={handleExample}>
+            Use Example
+          </Button>
+        </div>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-muted-foreground">Kit / bank name</span>
+          <input
+            className="rounded-md border border-border bg-background px-2 py-1"
+            value={label}
+            onChange={(event) => setLabel(event.currentTarget.value)}
+            placeholder="e.g. DirtMiniKit"
+          />
+          <span className="text-[11px] text-muted-foreground">
+            This is exactly what you pass to `.bank()`. Stick to letters/numbers (no spaces).
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-muted-foreground">Base URL</span>
+          <input
+            className="rounded-md border border-border bg-background px-2 py-1"
+            value={baseUrl}
+            onChange={(event) => setBaseUrl(event.currentTarget.value)}
+            placeholder="github:tidalcycles/dirt-samples/master/"
+          />
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium text-muted-foreground">Sample map (JSON)</span>
+          <textarea
+            className="min-h-[120px] rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
+            value={mapInput}
+            onChange={(event) => setMapInput(event.currentTarget.value)}
+            spellCheck={false}
+          />
+        </label>
+
+        {error ? (
+          <p className="rounded-md border border-destructive bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
+
+        <div className="flex justify-end">
+          <Button type="submit" disabled={isSubmitting || !engineReady}>
+            {isSubmitting ? 'Loading…' : 'Load Sample Bank'}
+          </Button>
+        </div>
+      </form>
+
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-4 text-sm">
+        <h3 className="text-base font-semibold">Loaded Banks</h3>
+        <p className="mb-3 text-xs text-muted-foreground">
+          After loading, reference the short names (e.g. `bd sd hh`) directly in your patterns: `s("bd sd,hh*8")`.
+        </p>
+        <div className="space-y-2">
+          {banks.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No custom banks yet.</p>
+          ) : (
+            banks.map((bank) => (
+              <div
+                key={bank.id}
+                className="rounded-lg border border-border/60 bg-background/70 px-3 py-2"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">{bank.label}</p>
+                    <p className="text-xs text-muted-foreground">{bank.sourceSummary}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleReload(bank.id)}
+                      disabled={bank.status === 'loading'}
+                    >
+                      Reload
+                    </Button>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => handleRemove(bank.id)}>
+                      Remove
+                    </Button>
+                  </div>
+                </div>
+                <div className="mt-1 flex items-center gap-2 text-xs">
+                  <span
+                    className={{
+                      ready: 'text-emerald-600',
+                      loading: 'text-amber-600',
+                      error: 'text-destructive',
+                      idle: 'text-muted-foreground',
+                    }[bank.status]}
+                  >
+                    {bank.status === 'ready'
+                      ? 'Ready'
+                      : bank.status === 'loading'
+                        ? 'Loading...'
+                        : bank.status === 'error'
+                          ? 'Error'
+                          : 'Idle'}
+                  </span>
+                  <span className="font-mono text-muted-foreground">
+                    Use: <code>.bank("{bank.label}")</code>
+                  </span>
+                  {bank.error ? <span className="text-destructive">{bank.error}</span> : null}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
