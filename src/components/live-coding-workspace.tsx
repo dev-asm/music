@@ -6,7 +6,7 @@ import CodeMirror from '@uiw/react-codemirror'
 import { javascript } from '@codemirror/lang-javascript'
 import { EditorState, Extension, RangeSetBuilder } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { Loader2, Play, Square } from 'lucide-react'
+import { Loader2, Play, Square, PackageSearch } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -23,6 +23,8 @@ import {
   type MiniLocation,
   type SampleBankState,
 } from '@/lib/strudel-engine'
+import { consumePendingSamplePack } from '@/lib/sample-bank-bridge'
+import { WorkspaceSurface } from '@/components/workspace-surface'
 
 const DEFAULT_CODE = `// Patterns are composed with Strudel\'s mini-notation.
 // Press Run Pattern to evaluate the code and hear the result.
@@ -108,6 +110,10 @@ const editorTheme = EditorView.theme(
 
 const engineInstance = () => new StrudelEngine({ autoRun: true })
 
+type LiveCodingWorkspaceProps = {
+  onOpenSamplePicker?: () => void
+}
+
 function formatStatus(state: EngineState) {
   if (!state.isReady) {
     return 'Loading Strudel…'
@@ -133,18 +139,49 @@ function formatStatus(state: EngineState) {
   return 'Idle'
 }
 
-export function LiveCodingWorkspace() {
+export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceProps = {}) {
   const [engine] = useState(() => engineInstance())
   const [code, setCode] = useState(DEFAULT_CODE)
   const [engineState, setEngineState] = useState<EngineState>(() => engine.getState())
   const [autoRun] = useState(engine.autoRun)
   const lastEvaluatedCodeRef = useRef(DEFAULT_CODE)
   const visualsRef = useRef<HTMLDivElement | null>(null)
+  const [importNotice, setImportNotice] = useState<string | null>(null)
 
   useEffect(() => {
     engine.setVisualContainer(visualsRef.current)
     return () => {
       engine.setVisualContainer(null)
+    }
+  }, [engine])
+
+  useEffect(() => {
+    const handleImport = () => {
+      const pack = consumePendingSamplePack()
+      if (!pack) {
+        return
+      }
+      engine
+        .loadSampleBank(pack.map, {
+          label: pack.label,
+          baseUrl: pack.baseUrl,
+        })
+        .then(() => {
+          setImportNotice(`Imported ${pack.label} (${Object.keys(pack.map).length} samples)`)
+          setTimeout(() => setImportNotice(null), 5000)
+        })
+        .catch((error) => {
+          if (process.env.NODE_ENV !== 'production') {
+            console.error('Failed to import sample pack', error)
+          }
+          setImportNotice('Failed to import sample pack. See console for details.')
+        })
+    }
+
+    handleImport()
+    window.addEventListener('strudel-sample-pack-import', handleImport)
+    return () => {
+      window.removeEventListener('strudel-sample-pack-import', handleImport)
     }
   }, [engine])
 
@@ -233,8 +270,7 @@ export function LiveCodingWorkspace() {
   }, [autoRun, code, engine, engineState.isPlaying, engineState.isReady])
 
   return (
-    <div className="relative max-w-4xl mx-auto">
-      <div className="absolute -inset-8 gradient-rainbow opacity-50 blur-3xl rounded-xl" />
+    <WorkspaceSurface>
       <Card className="relative bg-card">
         <CardHeader>
         <CardTitle className="text-2xl">Strudel Live Coding</CardTitle>
@@ -279,16 +315,26 @@ export function LiveCodingWorkspace() {
         <div ref={visualsRef} className="flex flex-col gap-4"></div>
         <div className="flex flex-col gap-2 text-sm">
           <p className="text-muted-foreground">{formatStatus(engineState)}</p>
+          {importNotice ? (
+            <p className="rounded-md border border-primary/50 bg-primary/10 px-3 py-2 text-primary">
+              {importNotice}
+            </p>
+          ) : null}
           {engineState.error ? (
             <p className="rounded-md border border-destructive bg-destructive/10 px-3 py-2 text-destructive">
               {engineState.error}
             </p>
           ) : null}
         </div>
-        <SampleBankSection engine={engine} banks={engineState.sampleBanks} engineReady={engineState.isReady} />
+        <SampleBankSection
+          engine={engine}
+          banks={engineState.sampleBanks}
+          engineReady={engineState.isReady}
+          onOpenSamplePicker={onOpenSamplePicker}
+        />
       </CardContent>
     </Card>
-    </div>
+    </WorkspaceSurface>
   )
 }
 
@@ -296,6 +342,7 @@ type SampleBankSectionProps = {
   engine: StrudelEngine
   banks: SampleBankState[]
   engineReady: boolean
+  onOpenSamplePicker?: () => void
 }
 
 const SAMPLE_MAP_EXAMPLE = `{
@@ -304,7 +351,7 @@ const SAMPLE_MAP_EXAMPLE = `{
   "hh": "hh27/000_hh27closedhh.wav"
 }`
 
-function SampleBankSection({ engine, banks, engineReady }: SampleBankSectionProps) {
+function SampleBankSection({ engine, banks, engineReady, onOpenSamplePicker }: SampleBankSectionProps) {
   const [label, setLabel] = useState('CustomKit')
   const [baseUrl, setBaseUrl] = useState('github:tidalcycles/dirt-samples/master/')
   const [mapInput, setMapInput] = useState(SAMPLE_MAP_EXAMPLE)
@@ -410,10 +457,16 @@ function SampleBankSection({ engine, banks, engineReady }: SampleBankSectionProp
           </p>
         ) : null}
 
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <Button type="submit" disabled={isSubmitting || !engineReady}>
             {isSubmitting ? 'Loading…' : 'Load Sample Bank'}
           </Button>
+          {onOpenSamplePicker ? (
+            <Button type="button" size="sm" variant="ghost" onClick={onOpenSamplePicker}>
+              <PackageSearch className="mr-1 size-4" />
+              Use Sample Picker
+            </Button>
+          ) : null}
         </div>
       </form>
 
