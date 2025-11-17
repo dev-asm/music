@@ -37,3 +37,22 @@ declare module '@strudel/transpiler' {
   const transpilerModule: Record<string, unknown>
   export = transpilerModule
 }
+
+declare module '@strudel/codemirror/slider' {
+  import type { Extension, StateEffect } from '@codemirror/state'
+  import type { EditorView } from '@codemirror/view'
+
+  export interface SliderWidgetConfig {
+    type: 'slider'
+    from: number
+    to: number
+    value: string
+    min: number
+    max: number
+    step?: number
+  }
+
+  export const sliderPlugin: Extension
+  export const setSliderWidgets: StateEffect<SliderWidgetConfig[]>
+  export function updateSliderWidgets(view: EditorView, widgets: SliderWidgetConfig[]): void
+}

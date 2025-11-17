@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useId } from 'react'
 
 import CodeMirror from '@uiw/react-codemirror'
 import { javascript } from '@codemirror/lang-javascript'
 import { EditorState, Extension, RangeSetBuilder } from '@codemirror/state'
 import { Decoration, EditorView } from '@codemirror/view'
-import { Loader2, Play, Square, PackageSearch } from 'lucide-react'
+import { Loader2, Play, Square, PackageSearch, ChevronDown, Waves } from 'lucide-react'
+import { sliderPlugin, updateSliderWidgets, type SliderWidgetConfig } from '@strudel/codemirror/slider'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -25,6 +26,8 @@ import {
 } from '@/lib/strudel-engine'
 import { consumePendingSamplePack } from '@/lib/sample-bank-bridge'
 import { WorkspaceSurface } from '@/components/workspace-surface'
+import { ScopeVisualization } from '@/components/scope-visualization'
+import { cn } from '@/lib/utils'
 
 const DEFAULT_CODE = `// Patterns are composed with Strudel\'s mini-notation.
 // Press Run Pattern to evaluate the code and hear the result.
@@ -108,7 +111,15 @@ const editorTheme = EditorView.theme(
   { dark: false },
 )
 
-const engineInstance = () => new StrudelEngine({ autoRun: true })
+// Singleton pattern to ensure only one engine instance exists
+// This prevents @strudel/core from being loaded multiple times
+let engineSingleton: StrudelEngine | null = null
+const engineInstance = () => {
+  if (!engineSingleton) {
+    engineSingleton = new StrudelEngine({ autoRun: true })
+  }
+  return engineSingleton
+}
 
 type LiveCodingWorkspaceProps = {
   onOpenSamplePicker?: () => void
@@ -146,14 +157,48 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
   const [autoRun] = useState(engine.autoRun)
   const lastEvaluatedCodeRef = useRef(DEFAULT_CODE)
   const visualsRef = useRef<HTMLDivElement | null>(null)
+  const scopeContainerRef = useRef<HTMLDivElement | null>(null)
   const [importNotice, setImportNotice] = useState<string | null>(null)
+  const editorViewRef = useRef<EditorView | null>(null)
+  const [sampleToolsOpen, setSampleToolsOpen] = useState(false)
+  const [scopeOpen, setScopeOpen] = useState(false)
+  const sampleToolsPanelId = useId()
 
   useEffect(() => {
+    // Set visual container for inline visuals (punchcard, etc.)
     engine.setVisualContainer(visualsRef.current)
     return () => {
       engine.setVisualContainer(null)
     }
   }, [engine])
+
+  useEffect(() => {
+    // Set scope container when scope window is open
+    // This needs to be set before patterns with .scope() are evaluated
+    if (scopeOpen && scopeContainerRef.current) {
+      engine.setScopeContainer(scopeContainerRef.current).then(() => {
+        // If code contains .scope() and is already evaluated, re-evaluate to connect to new container
+        if (code.includes('.scope()') && engineState.isReady && lastEvaluatedCodeRef.current === code) {
+          engine.evaluate(code, { autostart: engineState.isPlaying }).catch((error) => {
+            if (process.env.NODE_ENV !== 'production') {
+              console.error('Failed to re-evaluate with scope container:', error)
+            }
+          })
+        }
+      }).catch((error) => {
+        if (process.env.NODE_ENV !== 'production') {
+          console.error('Failed to set scope container:', error)
+        }
+      })
+    } else {
+      engine.setScopeContainer(null)
+    }
+    return () => {
+      if (scopeOpen) {
+        engine.setScopeContainer(null)
+      }
+    }
+  }, [engine, scopeOpen, code, engineState.isReady, engineState.isPlaying])
 
   useEffect(() => {
     const handleImport = () => {
@@ -210,8 +255,22 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
       isMounted = false
       unsubscribe()
       engine.dispose()
+      editorViewRef.current = null
     }
   }, [engine])
+
+  const sliderWidgets = useMemo(
+    () => (engineState.widgets ?? []).filter((widget): widget is SliderWidgetConfig => widget.type === 'slider'),
+    [engineState.widgets],
+  )
+
+  useEffect(() => {
+    const view = editorViewRef.current
+    if (!view) {
+      return
+    }
+    updateSliderWidgets(view, sliderWidgets)
+  }, [sliderWidgets])
 
   const highlightExtension = useMemo(
     () => buildHighlightExtension(engineState.miniLocations, engineState.activeLocations, code.length),
@@ -225,6 +284,7 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
       EditorView.lineWrapping,
       editorTheme,
       highlightExtension,
+      sliderPlugin,
     ],
     [highlightExtension],
   )
@@ -292,6 +352,15 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
                 <Play className="size-4" />
               )}
             </Button>
+            <Button
+              size="icon"
+              variant={scopeOpen ? 'default' : 'outline'}
+              onClick={() => setScopeOpen(!scopeOpen)}
+              disabled={!engineState.isReady}
+              aria-label={scopeOpen ? 'Close scope visualization' : 'Open scope visualization'}
+            >
+              <Waves className="size-4" />
+            </Button>
           </div>
         </CardAction>
       </CardHeader>
@@ -304,6 +373,10 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
             onChange={(value) => setCode(value)}
             extensions={extensions}
             theme="light"
+            onCreateEditor={(view) => {
+              editorViewRef.current = view
+              updateSliderWidgets(view, sliderWidgets)
+            }}
           />
           {!engineState.isReady ? (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 rounded-xl bg-background/85 backdrop-blur-sm">
@@ -326,14 +399,54 @@ export function LiveCodingWorkspace({ onOpenSamplePicker }: LiveCodingWorkspaceP
             </p>
           ) : null}
         </div>
-        <SampleBankSection
-          engine={engine}
-          banks={engineState.sampleBanks}
-          engineReady={engineState.isReady}
-          onOpenSamplePicker={onOpenSamplePicker}
-        />
+        <section className="rounded-xl border border-border/60 bg-muted/20 p-3">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1 text-left transition-colors hover:text-foreground"
+            onClick={() => setSampleToolsOpen((prev) => !prev)}
+            aria-expanded={sampleToolsOpen}
+            aria-controls={sampleToolsPanelId}
+          >
+            <div>
+              <p className="text-sm font-semibold">Sample loading tools</p>
+              <p className="text-xs text-muted-foreground">
+                Load custom banks or open the sample picker when you need it.
+              </p>
+            </div>
+            <ChevronDown
+              className={cn('size-4 transition-transform', sampleToolsOpen && 'rotate-180')}
+            />
+          </button>
+          <div
+            id={sampleToolsPanelId}
+            aria-hidden={!sampleToolsOpen}
+            className={cn(
+              'grid overflow-hidden transition-[grid-template-rows] duration-300 ease-out',
+              sampleToolsOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+            )}
+          >
+            <div
+              className={cn(
+                'min-h-0 overflow-hidden pt-4 transition-opacity duration-300 ease-out',
+                sampleToolsOpen ? 'opacity-100' : 'opacity-0',
+              )}
+            >
+              <SampleBankSection
+                engine={engine}
+                banks={engineState.sampleBanks}
+                engineReady={engineState.isReady}
+                onOpenSamplePicker={onOpenSamplePicker}
+              />
+            </div>
+          </div>
+        </section>
       </CardContent>
     </Card>
+    <ScopeVisualization
+      open={scopeOpen}
+      onClose={() => setScopeOpen(false)}
+      containerRef={scopeContainerRef}
+    />
     </WorkspaceSurface>
   )
 }
@@ -401,7 +514,7 @@ function SampleBankSection({ engine, banks, engineReady, onOpenSamplePicker }: S
   }
 
   return (
-    <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+    <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
       <form
         onSubmit={handleSubmit}
         className="space-y-3 rounded-xl border border-border/60 bg-muted/30 p-4 text-sm"

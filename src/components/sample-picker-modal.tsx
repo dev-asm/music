@@ -48,6 +48,7 @@ export function SamplePickerModal({ open, onClose, onMinimize }: SamplePickerMod
     path?: string
   } | null>(null)
   const [selection, setSelection] = useState<SelectionItem[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const modalRef = useRef<HTMLDivElement | null>(null)
 
@@ -65,6 +66,22 @@ export function SamplePickerModal({ open, onClose, onMinimize }: SamplePickerMod
   }, [selection])
 
   const sampleJson = useMemo(() => JSON.stringify(sampleMap, null, 2), [sampleMap])
+
+  const filteredCategories = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase()
+    if (!query) {
+      return categories
+    }
+    return categories
+      .map((category) => {
+        const items = category.items.filter((item) => {
+          const haystack = `${item.name} ${item.path}`.toLowerCase()
+          return haystack.includes(query)
+        })
+        return { ...category, items }
+      })
+      .filter((category) => category.items.length > 0)
+  }, [categories, searchQuery])
 
   const handleConnect = async () => {
     setStatus('loading')
@@ -267,6 +284,13 @@ export function SamplePickerModal({ open, onClose, onMinimize }: SamplePickerMod
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-6">
+                    <Input
+                      id="sample-search"
+                      value={searchQuery}
+                      onChange={(event) => setSearchQuery(event.currentTarget.value)}
+                      placeholder="Search samples by name or path"
+                      aria-label="Search samples"
+                    />
                     {status === 'loading' && (
                       <div className="flex min-h-[180px] items-center justify-center gap-2 text-muted-foreground">
                         <Loader2 className="size-5 animate-spin" />
@@ -278,7 +302,12 @@ export function SamplePickerModal({ open, onClose, onMinimize }: SamplePickerMod
                         No audio files detected. Make sure your repository has folders of samples.
                       </p>
                     ) : null}
-                    {categories.map((category) => (
+                    {searchQuery.trim() && status === 'ready' && categories.length > 0 && filteredCategories.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">
+                        No samples match “{searchQuery.trim()}”.
+                      </p>
+                    ) : null}
+                    {filteredCategories.map((category) => (
                         <div key={category.name} className="rounded-lg border border-border/60 bg-muted/15 p-4">
                         <div className="mb-3 flex items-center justify-between">
                           <div>
@@ -335,60 +364,62 @@ export function SamplePickerModal({ open, onClose, onMinimize }: SamplePickerMod
                   </CardContent>
                 </Card>
 
-                <Card
-                  className={cn('border-dashed', selection.length === 0 ? 'border-primary/40' : 'border-border/80')}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={handleDrop}
-                >
-                  <CardHeader>
-                    <CardTitle>Sample Basket</CardTitle>
-                    <CardDescription>
-                      Drop samples here, edit aliases, and import the pack into your Strudel session.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    {selection.length === 0 ? (
-                      <p className="rounded-md border border-dashed border-border/60 bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
-                        Drag samples from the left to assemble your pack.
-                      </p>
-                    ) : (
-                      <div className="space-y-3">
-                        {selection.map((item) => (
-                          <div
-                            key={item.id}
-                            className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/80 p-3"
-                          >
-                            <Input
-                              value={item.alias}
-                              onChange={(event) => handleAliasChange(item.id, event.currentTarget.value)}
-                              className="max-w-[160px] font-mono text-sm"
-                            />
-                            <p className="flex-1 truncate text-xs text-muted-foreground">{item.path}</p>
-                            <Button variant="ghost" size="sm" onClick={() => handleRemoveSample(item.id)}>
-                              Remove
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {selection.length > 0 && (
-                      <div className="space-y-3">
-                        <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-                          <p className="mb-2 text-xs font-semibold text-muted-foreground">strudel.json snippet</p>
-                          <code className="block max-h-48 overflow-auto rounded bg-background/70 p-3 text-xs">
-                            {sampleJson}
-                          </code>
-                          <p className="mt-2 text-xs text-muted-foreground">Base URL: {baseRawUrl || '—'}</p>
+                <div className="lg:sticky lg:top-6 lg:self-start">
+                  <Card
+                    className={cn('border-dashed', selection.length === 0 ? 'border-primary/40' : 'border-border/80')}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={handleDrop}
+                  >
+                    <CardHeader>
+                      <CardTitle>Sample Basket</CardTitle>
+                      <CardDescription>
+                        Drop samples here, edit aliases, and import the pack into your Strudel session.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {selection.length === 0 ? (
+                        <p className="rounded-md border border-dashed border-border/60 bg-muted/20 px-3 py-6 text-center text-sm text-muted-foreground">
+                          Drag samples from the left to assemble your pack.
+                        </p>
+                      ) : (
+                        <div className="space-y-3">
+                          {selection.map((item) => (
+                            <div
+                              key={item.id}
+                              className="flex items-center gap-3 rounded-lg border border-border/70 bg-background/80 p-3"
+                            >
+                              <Input
+                                value={item.alias}
+                                onChange={(event) => handleAliasChange(item.id, event.currentTarget.value)}
+                                className="max-w-[160px] font-mono text-sm"
+                              />
+                              <p className="flex-1 truncate text-xs text-muted-foreground">{item.path}</p>
+                              <Button variant="ghost" size="sm" onClick={() => handleRemoveSample(item.id)}>
+                                Remove
+                              </Button>
+                            </div>
+                          ))}
                         </div>
-                        <Button type="button" className="w-full" onClick={handleImport} disabled={!selection.length}>
-                          <Share2 className="mr-2 size-4" />
-                          Import to Environment
-                        </Button>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                      )}
+
+                      {selection.length > 0 && (
+                        <div className="space-y-3">
+                          <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                            <p className="mb-2 text-xs font-semibold text-muted-foreground">strudel.json snippet</p>
+                            <code className="block max-h-48 overflow-auto rounded bg-background/70 p-3 text-xs">
+                              {sampleJson}
+                            </code>
+                            <p className="mt-2 text-xs text-muted-foreground">Base URL: {baseRawUrl || '—'}</p>
+                          </div>
+                          <Button type="button" className="w-full" onClick={handleImport} disabled={!selection.length}>
+                            <Share2 className="mr-2 size-4" />
+                            Import to Environment
+                          </Button>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
               </div>
             </CardContent>
             </Card>

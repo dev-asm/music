@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react"
 import dynamic from "next/dynamic"
+import type { Route } from "next"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { Suspense } from "react"
 import { Loader2, PackageSearch } from "lucide-react"
@@ -33,7 +34,6 @@ export function HomeScreen() {
   const pathname = usePathname()
   const pickerOpen = searchParams.get("picker") === "1"
   const [pickerDocked, setPickerDocked] = useState(false)
-  const [isMinimizing, setIsMinimizing] = useState(false)
 
   const setPickerOpen = useCallback(
     (open: boolean, options?: { dock?: boolean }) => {
@@ -44,7 +44,8 @@ export function HomeScreen() {
         params.delete("picker")
       }
       const query = params.toString()
-      router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+      const nextUrl = (query ? `${pathname}?${query}` : pathname) as Route
+      router.replace(nextUrl, { scroll: false })
       if (open) {
         setPickerDocked(false)
       } else {
@@ -57,11 +58,7 @@ export function HomeScreen() {
   const handleOpenPicker = useCallback(() => setPickerOpen(true), [setPickerOpen])
   const handleClosePicker = useCallback(() => setPickerOpen(false), [setPickerOpen])
   const handleMinimizePicker = useCallback(() => {
-    setIsMinimizing(true)
-    setTimeout(() => {
-      setPickerOpen(false, { dock: true })
-      setIsMinimizing(false)
-    }, 180)
+    setPickerOpen(false, { dock: true })
   }, [setPickerOpen])
 
   return (
@@ -71,12 +68,7 @@ export function HomeScreen() {
           <LiveCodingWorkspace onOpenSamplePicker={handleOpenPicker} />
         </Suspense>
       </div>
-      <SamplePickerModal
-        open={pickerOpen}
-        isMinimizing={isMinimizing}
-        onClose={handleClosePicker}
-        onMinimize={handleMinimizePicker}
-      />
+      <SamplePickerModal open={pickerOpen} onClose={handleClosePicker} onMinimize={handleMinimizePicker} />
       {pickerDocked && (
         <div className="fixed bottom-6 right-6 z-40">
           <Button onClick={handleOpenPicker} className="shadow-lg">
